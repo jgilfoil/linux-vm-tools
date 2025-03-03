@@ -22,6 +22,18 @@ if [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
+# Check if the colord policy file already exists with the correct content
+if [ -f /etc/polkit-1/localauthority/50-local.d/45-allow-colord.pkla ]; then
+    # Check if the file contains the expected content
+    if grep -q "Allow Colord all Users" /etc/polkit-1/localauthority/50-local.d/45-allow-colord.pkla && \
+       grep -q "Identity=unix-user:\*" /etc/polkit-1/localauthority/50-local.d/45-allow-colord.pkla && \
+       grep -q "Action=org.freedesktop.color-manager.create-device" /etc/polkit-1/localauthority/50-local.d/45-allow-colord.pkla; then
+        echo "XRDP appears to be already configured. Skipping installation."
+        echo "Install is complete."
+        exit 0
+    fi
+fi
+
 apt update && apt upgrade -y
 
 if [ -f /var/run/reboot-required ]; then
@@ -94,13 +106,34 @@ ResultInactive=no
 ResultActive=yes
 EOF
 
-# reconfigure the service
-systemctl daemon-reload
-systemctl start xrdp
-
 #
 # End XRDP
 ###############################################################################
 
+###############################################################################
+# PulseAudio Module for XRDP
+#
+
+# Install required packages
+apt install -y xrdp pulseaudio pavucontrol build-essential dpkg-dev libpulse-dev git autoconf libtool
+
+# Clone and build the PulseAudio module for XRDP
+git clone https://github.com/neutrinolabs/pulseaudio-module-xrdp.git
+cd pulseaudio-module-xrdp
+./scripts/install_pulseaudio_sources_apt_wrapper.sh
+./bootstrap && ./configure PULSE_DIR=~/pulseaudio.src
+make
+make install
+
+# Return to previous directory
+cd ..
+
+# reconfigure the service
+systemctl daemon-reload
+systemctl start xrdp
+
 echo "Install is complete."
 echo "Reboot your machine to begin using XRDP."
+echo " "
+echo "Please run the following PowerShell command on your Windows host:"
+echo "Set-VM -VMName \"Your_VM_Name\" -EnhancedSessionTransportType HvSocket"
