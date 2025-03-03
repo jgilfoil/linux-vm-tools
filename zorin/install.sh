@@ -1,0 +1,141 @@
+#!/bin/bash
+
+#
+# This script is for Ubuntu 22.04 Jammy Jellyfish to download and install XRDP+XORGXRDP via
+# source.
+#
+# Major thanks to: http://c-nergy.be/blog/?p=11336 for the tips.
+#
+
+###############################################################################
+# Use HWE kernel packages
+#
+HWE=""
+#HWE="-hwe-22.04"
+
+###############################################################################
+# Update our machine to the latest code if we need to.
+#
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo 'This script must be run with root privileges' >&2
+    exit 1
+fi
+
+# Check if the colord policy file already exists with the correct content
+if [ -f /etc/polkit-1/localauthority/50-local.d/45-allow-colord.pkla ]; then
+    # Check if the file contains the expected content
+    if grep -q "Allow Colord all Users" /etc/polkit-1/localauthority/50-local.d/45-allow-colord.pkla && \
+       grep -q "Identity=unix-user:\*" /etc/polkit-1/localauthority/50-local.d/45-allow-colord.pkla && \
+       grep -q "Action=org.freedesktop.color-manager.create-device" /etc/polkit-1/localauthority/50-local.d/45-allow-colord.pkla; then
+        echo "XRDP appears to be already configured. Skipping installation."
+        echo "Install is complete."
+        exit 0
+    fi
+fi
+
+apt update && apt upgrade -y
+
+if [ -f /var/run/reboot-required ]; then
+    echo "A reboot is required in order to proceed with the install." >&2
+    echo "Please reboot and re-run this script to finish the install." >&2
+    exit 1
+fi
+
+###############################################################################
+# XRDP
+#
+
+# Install hv_kvp utils
+apt install -y linux-tools-virtual${HWE}
+apt install -y linux-cloud-tools-virtual${HWE}
+
+# Install the xrdp service so we have the auto start behavior
+apt install -y xrdp
+
+systemctl stop xrdp
+systemctl stop xrdp-sesman
+
+# Configure the installed XRDP ini files.
+# use vsock transport.
+sed -i_orig -e 's/port=3389/port=vsock:\/\/-1:3389/g' /etc/xrdp/xrdp.ini
+# use rdp security.
+sed -i_orig -e 's/security_layer=negotiate/security_layer=rdp/g' /etc/xrdp/xrdp.ini
+# remove encryption validation.
+sed -i_orig -e 's/crypt_level=high/crypt_level=none/g' /etc/xrdp/xrdp.ini
+# disable bitmap compression since its local its much faster
+sed -i_orig -e 's/bitmap_compression=true/bitmap_compression=false/g' /etc/xrdp/xrdp.ini
+
+# Create the Zorin desktop session configuration in startwm.sh
+cat > /etc/xrdp/startwm.sh << EOF
+#!/bin/sh
+if test -r /etc/profile; then
+    . /etc/profile
+fi
+
+export XDG_SESSION_TYPE=x11
+export XDG_CURRENT_DESKTOP=zorin
+export GDMSESSION=zorin
+export GNOME_SHELL_SESSION_MODE=zorin
+export DESKTOP_SESSION=zorin
+exec env GNOME_SHELL_SESSION_MODE=zorin gnome-session --session=zorin
+EOF
+chmod a+x /etc/xrdp/startwm.sh
+
+# rename the redirected drives to 'shared-drives'
+sed -i -e 's/FuseMountName=thinclient_drives/FuseMountName=shared-drives/g' /etc/xrdp/sesman.ini
+
+# Changed the allowed_users
+sed -i_orig -e 's/allowed_users=console/allowed_users=anybody/g' /etc/X11/Xwrapper.config
+
+# Blacklist the vmw module
+if [ ! -e /etc/modprobe.d/blacklist-vmw_vsock_vmci_transport.conf ]; then
+  echo "blacklist vmw_vsock_vmci_transport" > /etc/modprobe.d/blacklist-vmw_vsock_vmci_transport.conf
+fi
+
+#Ensure hv_sock gets loaded
+if [ ! -e /etc/modules-load.d/hv_sock.conf ]; then
+  echo "hv_sock" > /etc/modules-load.d/hv_sock.conf
+fi
+
+# Configure the policy xrdp session
+cat > /etc/polkit-1/localauthority/50-local.d/45-allow-colord.pkla <<EOF
+[Allow Colord all Users]
+Identity=unix-user:*
+Action=org.freedesktop.color-manager.create-device;org.freedesktop.color-manager.create-profile;org.freedesktop.color-manager.delete-device;org.freedesktop.color-manager.delete-profile;org.freedesktop.color-manager.modify-device;org.freedesktop.color-manager.modify-profile
+ResultAny=no
+ResultInactive=no
+ResultActive=yes
+EOF
+
+#
+# End XRDP
+###############################################################################
+
+###############################################################################
+# PulseAudio Module for XRDP
+#
+
+# Install required packages
+apt install -y xrdp pulseaudio pavucontrol build-essential dpkg-dev libpulse-dev git autoconf libtool
+
+# Clone and build the PulseAudio module for XRDP
+git clone https://github.com/neutrinolabs/pulseaudio-module-xrdp.git
+cd pulseaudio-module-xrdp
+./scripts/install_pulseaudio_sources_apt_wrapper.sh
+./bootstrap && ./configure PULSE_DIR=~/pulseaudio.src
+make
+make install
+
+# Return to previous directory
+cd ..
+
+# reconfigure the service
+systemctl daemon-reload
+systemctl start xrdp
+
+echo "Install is complete."
+echo "Reboot your machine to begin using XRDP."
+echo " "
+echo "Please run the following PowerShell command on your Windows host:"
+echo "Set-VM -VMName \"Your_VM_Name\" -EnhancedSessionTransportType HvSocket"
